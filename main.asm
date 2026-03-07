@@ -3,23 +3,27 @@
 ;*
 ;*			Authors: Daniel Green, Graham Glazner
 ;*			Date Created: 2/27/2026
-;*			Date Modified: 3/6/2026
+;*			Date Modified: 3/7/2026
 ;
 ;***********************************************************
 
 ;***********************************************************
 ;*	Internal Register Definitions and Constants
 ;***********************************************************
-.def	mpr = r16				; Multipurpose register
-.def	zero = r6
 
 ; cycle between vals 1-3 (rock,paper,scissor)
-.def	RHGestureReg = r7
+.def	OppLHGestReg = r5
+.def	OppRHGestReg = r6
+.def	RHGestureReg = r7 
 .def	LHGestureReg = r8
 
+; Time
 .def	ElapsedTicks = r9
 .def	RemainingTime = r10
 
+.def	mpr = r16				; Multipurpose register
+
+; Wait
 .def	waitcnt = r17			; Wait Loop Counter
 .def	ilcnt = r18				; Inner Loop Counter
 .def	olcnt = r19				; Outer Loop Counter
@@ -95,8 +99,6 @@ INIT:
 		rcall LCDBacklightOn
 		rcall LCDClr
 
-		clr zero
-
 		rcall USART_INIT
 
 		; Configure the External Interrupt Mask
@@ -160,7 +162,7 @@ _grWaitA:
 
 		; display ready message (ID 4)
 		ldi mpr, 4
-		mov r17, zero	
+		ldi r17, 0	
 		rcall LOADSTR
 
 		; TEST!~! TEST!@ REMOVE THIS!@!@#
@@ -172,14 +174,7 @@ _grWaitA:
 		brne _readyWaitTop
 		jmp _bothRdy
 
-
-; prep countdown timer
-
-
-
 clr r17
-clr zero
-
 _readyWaitTop:
 		rcall USART_Receive
 		cpi	r17, ReadySigVal
@@ -248,11 +243,31 @@ _gameFinishedA:
 
 		; print debug message
 		ldi mpr, 3
-		mov r17, zero	
+		ldi r17, 0	
 		rcall LOADSTR
 
 		; we will have recieved P2s RH and LH choices now, grab from buffer
 		; 'get one out' starts here
+		
+		
+		; xmit both gestures, LH, RH
+		mov r17, LHGestureReg
+		rcall USART_Transmit
+		mov r17, RHGestureReg
+		rcall USART_Transmit
+
+		; recv both gestures, LH,RH
+		rcall USART_Receive
+		mov OppLHGestReg, r17
+		rcall USART_Receive
+		mov OppRHGestReg, r17
+		
+
+		; display opponent choices in correct locations
+		ldi mpr, RockSigVal
+		mov OppLHGestReg, mpr
+		mov OppRHGestReg, mpr
+		rcall DISPOPPGESTS
 
 testTop:	
 		rjmp testTop
@@ -278,6 +293,60 @@ TC1OVF:
 	pop mpr
 	reti
 
+DISPOPPGESTS:
+	push mpr
+	push r17
+	push r18
+
+	; Print divider to top row
+	ldi mpr, 10
+	ldi r17, 0
+	rcall LOADSTR
+
+	; read out opponent's LH gesture first
+	mov mpr, OppLHGestReg
+	cpi mpr, RockSigVal		; rock?
+	brne _notOppLHRock
+		ldi mpr, 7			; ID 7
+		jmp _oppLhCycleEnd
+_notOppLHRock:
+	cpi mpr, PaperSigVal	; paper?
+	brne _notOppLHPaper
+		ldi mpr, 8
+		jmp _oppLhCycleEnd
+_notOppLHPaper:
+	cpi mpr, ScissorSigVal	; scissor?
+	brne _oppLhCycleEnd
+		ldi mpr, 9
+		jmp _oppLhCycleEnd
+_oppLhCycleEnd:
+	ldi r17, 0		; RH string at offset 0 of L1
+	rcall LOADSTR
+
+	; now same with RH gesture
+		mov mpr, OppRHGestReg
+	cpi mpr, RockSigVal		; rock?
+	brne _notOppRHRock
+		ldi mpr, 7			; ID 7
+		jmp _oppRhCycleEnd
+_notOppRHRock:
+	cpi mpr, PaperSigVal	; paper?
+	brne _notOppRHPaper
+		ldi mpr, 8
+		jmp _oppRhCycleEnd
+_notOppRHPaper:
+	cpi mpr, ScissorSigVal	; scissor?
+	brne _oppRhCycleEnd
+		ldi mpr, 9
+		jmp _oppRhCycleEnd
+_oppRhCycleEnd:
+	ldi r17, 9		; RH string at offset 9, L1
+	rcall LOADSTR
+
+	pop r18
+	pop r17
+	pop mpr
+	ret
 
 ;***********************************************************
 ;*	DISPTIMER
