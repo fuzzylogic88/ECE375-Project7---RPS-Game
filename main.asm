@@ -1,9 +1,10 @@
 ;***********************************************************
-;*					ECE370 - Lab 7
+;*	ECE370 Lab 7: Remotely Communicated Rock Paper Scissors
 ;*
-;*			Author: Daniel Green, Graham Glazner
-;*					Date: 2/27/2026
-;*
+;*			Authors: Daniel Green, Graham Glazner
+;*			Date Created: 2/27/2026
+;*			Date Modified: 3/6/2026
+;
 ;***********************************************************
 
 ;***********************************************************
@@ -11,9 +12,11 @@
 ;***********************************************************
 .def	mpr = r16				; Multipurpose register
 .def	zero = r6
-.def	stateReg = r7			; interrupt flag
 
-.def	TimerTickReg = r8
+; cycle between vals 1-3 (rock,paper,scissor)
+.def	RHGestureReg = r7
+.def	LHGestureReg = r8
+
 .def	ElapsedTime = r9
 
 .def	waitcnt = r17			; Wait Loop Counter
@@ -21,19 +24,17 @@
 .def	olcnt = r19				; Outer Loop Counter
 .equ	WTime = 15				; 150ms debounce delay
 
-
-.equ	RightEngineDir = 4
-.equ	LeftEngineDir = 7
-.equ	MovFwd = (1<<RightEngineDir|1<<LeftEngineDir)
-
 ; Control buttons (PORTD):
-.equ	GestureCycleRHBtn = 4
+.equ	CycleGestureRHBtn = 4
 .equ	CycleGestureLHBtn = 5
 .equ	StartBtn = 7
 
-; COUNTDOWN TIMER PARAMS:
-.equ	TimerCountownDurationSeconds = 6
+; Signals
+.equ	ReadySigVal = 0x05
 
+.equ	RockSigVal = 0x01
+.equ	PaperSigVal = 0x02
+.equ	ScissorSigVal = 0x03
 
 
 ;***********************************************************
@@ -47,19 +48,6 @@
 
 .org $0000		; Beginning of IVs
 rjmp INIT		; Reset interrupt
-
-.org $0002		; INT0,pd7
-rjmp GAMESTATECHG
-
-.org $0004		; INT1,pd4
-rjmp CYCLEGESTURERH
-
-.org $0008		; INT3,pd5
-rjmp CYCLEGESTURELH
-
-.org OVF1addr	; Timer counter 1 overflow
-rjmp TIMERTICK
-
 
 .org	$0056	; End of Interrupt Vectors
 
@@ -95,11 +83,6 @@ INIT:
 
 		rcall USART_INIT
 
-		; Configure External Interrupts, if needed
-		; Set the Interrupt Sense Control to falling edge
-		ldi mpr, 0b1000_1010 ;int3, int1, int0 => 0b10
-		sts EICRA, mpr
-
 		; Configure the External Interrupt Mask
 		ldi mpr, (1<<INT0)|(1<<INT1)|(1<<INT3)
 		out EIMSK, mpr
@@ -107,32 +90,25 @@ INIT:
 		; Configure 16-bit Timer/Counter 1A and 1B
 		; set compare output mode (COM) and wave generation mode (WGM) for both timers
 		;
-		; Project 7: normal mode (WGM all 0), clk_freq/1024 prescaler (CSN2->CSN0, 101) => 64us per tick
+		; Project 7: normal mode (WGM all 0), clk_freq/256 prescaler (CSN2->CSN0, 100)
 		ldi mpr, (0<<COM1A1) | (0<<COM1A0) | (0<<COM1B1) | (0<<COM1B0) | (0<<WGM11) | (0<<WGM10)
 		sts TCCR1A, mpr	
 
-
-		; timer configuration for initial/load value (reaching 65535 for T1):
-		; 150ms per tick, 10 ticks per 1.5 seconds, 4 * 10 ticks per 6
-		ldi mpr, low(63192) 
-		ldi r17, high(63192)
+		; timer configuration for initial/load value
+		ldi mpr, low(46875) 
+		ldi r17, high(46875)
 		sts TCNT1H, r17
 		sts	TCNT1L, mpr
 
-		; enable timer 1 overflow interrupt
-		ldi mpr, (1<<TOIE1)
-		sts TIMSK1, mpr
-
-		ldi mpr, (0<<WGM13) | (0<<WGM12) | (1<<CS12) | (0<<CS11) | (1<<CS10)
+		ldi mpr, (0<<WGM13) | (0<<WGM12) | (1<<CS12) | (0<<CS11) | (0<<CS10)
 		sts TCCR1B, mpr
-
-		; Enable global interrupts
-		sei
 	
+
+
 
 ;***********************************************************
 ;*	Main Program
-;***********************************************************
+
 MAIN:
 
 		; Display welcome message line 1 (ID 1)
@@ -140,97 +116,203 @@ MAIN:
 		ldi r17, 0		; string occurs at offset zero
 		rcall LOADSTR	; load + display string ID 1
 
-; wait for button press for game-ready
-clr stateReg
+; poll for button press to start game
 _grWaitA:
-		mov mpr, stateReg
-		cpi mpr, 1		
-		brne _grWaitA
+
+		in		mpr, PIND			; Read button state
+		andi	mpr, (1<<StartBtn)	; Mask only start button (7) state into mpr 
+		cpi		mpr, 0				; Is it pressed?
+		brne	_grWaitA			; Not pressed, jump to top of loop.
+
+		; debounce
 		ldi		waitcnt, WTime	; Wait for 150ms
 		rcall	Wait	
 
-		; clear screen of welcome message
 		rcall LCDClr
 
-		; xmit ready signal
+		; txmit ready signal, and preserve preexisting value
+		rcall USART_Receive
+		mov r18, r17
+
+		ldi r17, ReadySigVal
+		rcall USART_Transmit
 
 		; display ready message (ID 4)
 		ldi mpr, 4
-		mov r17, zero	; string occurs at offset zero
-		rcall LOADSTR	; load + display string ID 1
+		mov r17, zero	
+		rcall LOADSTR
 
 
-; wait for ready signal from other board
-clr stateReg 
-_grWaitB:
-		mov mpr, stateReg
-		cpi mpr, 2		
-		brne _grWaitB
+		; read whatever data might've been waiting in recv buffer
+		; if we've already gotten the ready signal, skip the poll
+		cpi r18, ReadySigVal
+		brne _readyWaitTop
+		jmp _bothRdy
 
+clr r17
+_readyWaitTop:
+		rcall USART_Receive
+		cpi	r17, ReadySigVal
+		brne _readyWaitTop
+
+_bothRdy:
 		; everyone's ready, start 6-second countdown /w LEDs
-
-		; disp gamestart message (ID 2)
+		; disp gamestart message (ID 2) and divider for RH/LH gestures
 		ldi mpr, 2
 		ldi r17, 0
 		rcall LOADSTR
 
-		; enable gesture cycling (none initially displayed)
-		; start 6 sec (1.5sec per LED change) timer
+		; divider (ID 10) 
+		ldi mpr, 10
+		ldi r17, $16 ; start of 2nd LCD line
+		rcall LOADSTR
 
-clr TimerTickReg
-testTop:
+_gameLoopTop:
+	
+		; poll for RH changes
+		in		mpr, PIND					; Read button state
+		andi	mpr, (1<<CycleGestureRHBtn)	; Mask button into mpr 
+		cpi		mpr, 0						; Is it pressed?
+		breq _cycleRHInternal
+		jmp _skipRHCycle
+_cycleRHInternal:
+		rcall CYCLERHGESTURE
+
+_skipRHCycle:
+		; poll for LH changes
+		in		mpr, PIND					; Read button state
+		andi	mpr, (1<<CycleGestureLHBtn)	; Mask only start button (7) state into mpr 
+		cpi		mpr, 0
+		breq _cycleLHInternal
+		jmp _skipLHCycle
+_cycleLHInternal:
+		rcall CYCLELHGESTURE
+
+_skipLHCycle:
+		; timer read, tick, and compare :
+
+		rcall UPDATETIMERLEDS
 		mov mpr, ElapsedTime
-		cpi mpr, 4
-		brlt testTop
+		cpi mpr, 6	; have six seconds elapsed?
+		brne _gameLoopTop
 
-		; print divider to lower screen
-		ldi mpr, 10
-		ldi r17, 16	; string occurs at start of 2nd line
-		rcall LOADSTR
+_gameFinishedA:
 
-		; disable gesture cycling
+		; we will have recieved P2s RH and LH choices now, grab from buffer
+		; 'get one out' starts here
 
-		; overwrite top line with divider
-		ldi mpr, 10
-		ldi r17, 0	; string occurs at start of 2nd line
-		rcall LOADSTR
-
-		; display opponent's choice
+testTop:	
+		rjmp testTop
 		rjmp	MAIN
 
+;*	!!!	End of Main !!! !!!	End of Main !!! !!!	End of Main !!! 
+;***************************************************************
 
-TIMERTICK:
+
+
+;***********************************************************
+;*	CYCLERHGESTURE
+;*	Selects new gesture for RIGHT hand, updates LCD
+;***********************************************************
+CYCLERHGESTURE:
+	push mpr
+	mov mpr, RHGestureReg
+	cpi mpr, 3				; scissor / 3 ? 
+	brne _rhIncrement
+	ldi mpr, 1
+	mov RHGestureReg, mpr	; back to rock / 1
+	jmp _skipRHIncrement
+_rhIncrement:
+	inc RHGestureReg		; val++
+_skipRHIncrement:
+	; update RH displayed LCD text
+	; todo: validate LH cycling works, then paste it in here
+
+	ldi		waitcnt, WTime	; Wait for 150ms
+	rcall	Wait	
+	pop mpr
+	ret
+
+
+;***********************************************************
+;*	CYCLELHGESTURE
+;*	Selects new gesture for LEFT hand, updates LCD
+;***********************************************************
+CYCLELHGESTURE:
 	push mpr
 	push r17
 
-	in r17, SREG
+	mov mpr, LHGestureReg
+	cpi mpr, 3				; scissor / 3 ? 
+	brne _lhIncrement
+	ldi mpr, 1
+	mov LHGestureReg, mpr	; back to rock / 1
+	jmp _skipLHIncrement
+_lhIncrement:
+	inc LHGestureReg		; val++
+_skipLHIncrement:
 
-	inc TimerTickReg
-	mov mpr, TimerTickReg
-	cpi mpr, 10
+	; update LH displayed LCD text
+	mov mpr, LHGestureReg
+	cpi mpr, RockSigVal		; rock?
+	brne _notLHRock
+		ldi mpr, 7			; ID 7
+		jmp _lhCycleEnd
+_notLHRock:
+	cpi mpr, PaperSigVal	; paper?
+	brne _notLHPaper
+		ldi mpr, 8
+		jmp _lhCycleEnd
+_notLHPaper:
+	cpi mpr, ScissorSigVal	; scissor?
+	brne _lhCycleEnd
+		ldi mpr, 9
+		jmp _lhCycleEnd
 
-	brne exitTick
+_lhCycleEnd:
+	ldi r17, 0		; LH string always offset 0
+	rcall LOADSTR	; display selected string
 
-	inc ElapsedTime		; 10*150ms ticks => 1.5s elapsed
-	clr TimerTickReg
+	ldi		waitcnt, WTime	; Wait for 150ms
+	rcall	Wait	
 
-exitTick:
-	ldi mpr, low(63192) 
-	ldi r17, high(63192)
-	sts TCNT1H, r17
-	sts	TCNT1L, mpr
-
-	out SREG, r17
 	pop r17
 	pop mpr
-	reti
+	ret
+
+
+;***********************************************************
+;*	USART_Transmit
+;*	Sends a single char in r17 over USART
+;***********************************************************
+USART_Transmit:
+
+	; Wait for empty transmit buffer
+	lds mpr, UCSR1A
+	cpi mpr, (1<<UDRE1)
+	brne USART_Transmit
+
+	; Put data (r17) into buffer, sends the data
+	sts UDR1,r17
+	ret
+
+
+;******************************************************************
+;*	USART_Receive
+;*	gets newly-arrived char from recieve buffer and place into r17
+;******************************************************************
+USART_Receive:
+	push mpr		; Save mpr
+	lds r17, UDR1	; Get data from Receive Data Buffer
+	pop mpr			; Restore mpr
+	ret
 
 
 ;***********************************************************
 ;*	DISPTIMER
 ;*	Displays timer countdown on D4->D7 LEDs (0-15)
 ;***********************************************************
-DISPTIMER:
+UPDATETIMERLEDS:
 	push mpr
 	push r18
 
@@ -243,48 +325,17 @@ DISPTIMER:
 	pop mpr
 	ret
 
-
-GAMESTATECHG:
-	push mpr
-
-	inc stateReg
-
-	ldi mpr, 0b0001011
-	out EIFR, mpr
-
-	pop mpr
-	reti
-
-CYCLEGESTURERH:
-	push mpr
-
-	;code here
-
-	ldi mpr, 0b0001011
-	out EIFR, mpr
-
-	pop mpr
-	reti
-
-CYCLEGESTURELH:
-	push mpr
-
-	; code here
-
-	ldi mpr, 0b0001011
-	out EIFR, mpr
-
-	pop mpr
-	reti
-
-
+;***********************************************************
+;*	USART_Init
+;*	Configures and enables USART functionality
+;***********************************************************
 USART_Init:
 	push mpr
 	push r17  
 
-	; 415 = UBBRN for 2400 Baud
-	ldi mpr, 0b10011111
-	ldi r17, 0b00000001
+	; 416 = UBBRN for 2400 Baud
+	ldi mpr, low(416)
+	ldi mpr, high(416)
 
 	; Set baud rate
 	sts UBRR1H, r17
@@ -324,10 +375,10 @@ LOADSTR:
 
 		cpi mpr, 1
 		brne NOT1
-			ldi r18, 32						; prime with our string length
-			ldi ZL, low(WELCOME_BEG<<1)		; load source address (low)	
-			ldi ZH, high(WELCOME_BEG<<1)	; load source address (high)
-			rjmp LOAD
+		ldi r18, 32						; prime with our string length
+		ldi ZL, low(WELCOME_BEG<<1)		; load source address (low)	
+		ldi ZH, high(WELCOME_BEG<<1)	; load source address (high)
+		rjmp LOAD
 NOT1:
 		cpi mpr, 2
 		brne NOT2
@@ -366,27 +417,27 @@ NOT5:
 NOT6:
 		cpi mpr, 7
 		brne NOT7
-			ldi r18, 8						
+			ldi r18, 7						
 			ldi ZL, low(ROCK_BEG<<1)
 			ldi ZH, high(ROCK_BEG<<1)
 			rjmp LOAD
 NOT7:
 		cpi mpr, 8
 		brne NOT8
-			ldi r18, 8					
+			ldi r18, 7					
 			ldi ZL, low(PAPER_BEG<<1)
 			ldi ZH, high(PAPER_BEG<<1)
 			rjmp LOAD
 NOT8:
 		cpi mpr, 9
 		brne NOT9
-			ldi r18, 8					
+			ldi r18, 7				
 			ldi ZL, low(SCISSOR_BEG<<1)
 			ldi ZH, high(SCISSOR_BEG<<1)
 			rjmp LOAD
 NOT9:
 		cpi mpr, 10
-		brne NOLOAD							; If no ID available, just exit.
+		brne NOLOAD		; If no ID available, just exit.
 			ldi r18, 16					
 			ldi ZL, low(DIVIDER_BEG<<1)
 			ldi ZH, high(DIVIDER_BEG<<1)
@@ -483,21 +534,21 @@ YOULOSE_BEG:
 YOULOSE_END:
 
 ; ID: 7
-; strlen 8
+; strlen 7
 ROCK_BEG:
-.DB		"Rock    "		
+.DB		"Rock   "		
 ROCK_END:
 
 ; ID: 8
-; strlen 8
+; strlen 7
 PAPER_BEG:
-.DB		"Paper   "		
+.DB		"Paper  "		
 PAPER_END:
 
 ; ID: 9
-; strlen 8
+; strlen 7
 SCISSOR_BEG:
-.DB		"Scissor "		
+.DB		"Scissor"		
 SCISSOR_END:
 
 ; ID: 10
@@ -506,6 +557,7 @@ SCISSOR_END:
 DIVIDER_BEG:
 .DB		"       |        "
 DIVIDER_END:
+
 
 
 ;***********************************************************
