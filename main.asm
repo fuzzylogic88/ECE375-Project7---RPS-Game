@@ -17,12 +17,23 @@
 .def	RHGestureReg = r7
 .def	LHGestureReg = r8
 
-.def	ElapsedTime = r9
+.def	ElapsedTicks = r9
+.def	RemainingTime = r10
 
 .def	waitcnt = r17			; Wait Loop Counter
 .def	ilcnt = r18				; Inner Loop Counter
 .def	olcnt = r19				; Outer Loop Counter
 .equ	WTime = 15				; 150ms debounce delay
+
+;LED bits
+.equ LED5 = 4
+.equ LED6 = 5
+.equ LED7 = 6
+.equ LED8 = 7
+.equ FourSec = (1<<LED5 | 1<<LED6 | 1<<LED7 | 1<<LED8)
+.equ ThreeSec = (1<<LED5 | 1<<LED6 | 1<<LED7)
+.equ TwoSec = (1<<LED5 | 1<<LED6)
+.equ OneSec = (1<<LED5)
 
 ; Control buttons (PORTD):
 .equ	CycleGestureRHBtn = 4
@@ -36,6 +47,8 @@
 .equ	PaperSigVal = 0x02
 .equ	ScissorSigVal = 0x03
 
+; misc
+.equ	CountTime = 4
 
 ;***********************************************************
 ;*	Start of Code Segment
@@ -48,6 +61,9 @@
 
 .org $0000		; Beginning of IVs
 rjmp INIT		; Reset interrupt
+
+.org OVF1addr	; timer counter 1 overflow
+rjmp TC1OVF
 
 .org	$0056	; End of Interrupt Vectors
 
@@ -95,14 +111,19 @@ INIT:
 		sts TCCR1A, mpr	
 
 		; timer configuration for initial/load value
-		ldi mpr, low(46875) 
-		ldi r17, high(46875)
+		; 0.5sec per rollover:
+		; ((65535+1-x)*256) / 8MHz = 0.5
+		ldi mpr, low(49911)  
+		ldi r17, high(49911)
 		sts TCNT1H, r17
 		sts	TCNT1L, mpr
 
 		ldi mpr, (0<<WGM13) | (0<<WGM12) | (1<<CS12) | (0<<CS11) | (0<<CS10)
 		sts TCCR1B, mpr
 	
+		ldi r16, (1<<TOIE1)
+		sts TIMSK1, r16
+		sei
 
 
 
@@ -142,6 +163,8 @@ _grWaitA:
 		mov r17, zero	
 		rcall LOADSTR
 
+		; TEST!~! TEST!@ REMOVE THIS!@!@#
+		jmp _bothRdy
 
 		; read whatever data might've been waiting in recv buffer
 		; if we've already gotten the ready signal, skip the poll
@@ -149,7 +172,14 @@ _grWaitA:
 		brne _readyWaitTop
 		jmp _bothRdy
 
+
+; prep countdown timer
+
+
+
 clr r17
+clr zero
+
 _readyWaitTop:
 		rcall USART_Receive
 		cpi	r17, ReadySigVal
@@ -162,11 +192,18 @@ _bothRdy:
 		ldi r17, 0
 		rcall LOADSTR
 
-		; divider (ID 10) 
+		; clear the 2nd line of LCD and write divider
 		ldi mpr, 10
-		ldi r17, $16 ; start of 2nd LCD line
+		ldi r17, 16
 		rcall LOADSTR
 
+		; clear gesture regs
+		clr RHGestureReg
+		clr LHGestureReg
+
+ldi mpr, CountTime
+mov RemainingTime, mpr 
+clr ElapsedTicks
 _gameLoopTop:
 	
 		; poll for RH changes
@@ -189,26 +226,101 @@ _cycleLHInternal:
 		rcall CYCLELHGESTURE
 
 _skipLHCycle:
-		; timer read, tick, and compare :
 
-		rcall UPDATETIMERLEDS
-		mov mpr, ElapsedTime
-		cpi mpr, 6	; have six seconds elapsed?
+		; timer read, tick, and compare
+
+		cli
+		mov mpr, ElapsedTicks
+		cpi mpr, 3 ; 3 ticks => 1.5sec elapsed
+		brlo _noTick	; mpr < 2, no big tick
+_doCountdownTick:
+		dec RemainingTime
+		clr ElapsedTicks
+_noTick:
+		rcall DISPTIMER
+		mov mpr, RemainingTime
+		cpi mpr, 0	; have six seconds elapsed?
+		sei
+
 		brne _gameLoopTop
 
 _gameFinishedA:
+
+		; print debug message
+		ldi mpr, 3
+		mov r17, zero	
+		rcall LOADSTR
 
 		; we will have recieved P2s RH and LH choices now, grab from buffer
 		; 'get one out' starts here
 
 testTop:	
 		rjmp testTop
+
 		rjmp	MAIN
 
 ;*	!!!	End of Main !!! !!!	End of Main !!! !!!	End of Main !!! 
 ;***************************************************************
 
 
+TC1OVF:
+	push mpr
+	push r17
+
+	inc ElapsedTicks	; 0.5sec per tick, 3 ticks per 1.5
+
+	ldi mpr, low(49911)  
+	ldi r17, high(49911)
+	sts TCNT1H, r17
+	sts	TCNT1L, mpr
+
+	pop r17
+	pop mpr
+	reti
+
+
+;***********************************************************
+;*	DISPTIMER
+;*	Displays timer countdown on D4->D7 LEDs
+;***********************************************************
+DISPTIMER:
+	push mpr
+	push r18
+
+	; read existing PB state
+	mov r18, RemainingTime
+
+	cpi r18, 4
+	brne _lt4
+	ldi mpr, FourSec
+	jmp _tEnd
+_lt4:
+	cpi r18, 3
+	brne _lt3
+	ldi mpr, ThreeSec
+	jmp _tEnd
+_lt3:
+	cpi r18, 2
+	brne _lt2
+	ldi mpr, TwoSec
+	jmp _tEnd
+_lt2:
+	cpi r18, 1
+	brne _lt1
+	ldi mpr, OneSec
+	jmp _tEnd
+_lt1:
+	cpi r18, 0
+	brne _noChg
+	ldi mpr, 0
+	jmp _tEnd
+
+_tEnd:
+	out PORTB, mpr
+_noChg:
+	pop r18
+	pop mpr
+	ret
 
 ;***********************************************************
 ;*	CYCLERHGESTURE
@@ -216,6 +328,8 @@ testTop:
 ;***********************************************************
 CYCLERHGESTURE:
 	push mpr
+	push r17
+
 	mov mpr, RHGestureReg
 	cpi mpr, 3				; scissor / 3 ? 
 	brne _rhIncrement
@@ -225,11 +339,32 @@ CYCLERHGESTURE:
 _rhIncrement:
 	inc RHGestureReg		; val++
 _skipRHIncrement:
+
 	; update RH displayed LCD text
-	; todo: validate LH cycling works, then paste it in here
+	mov mpr, RHGestureReg
+	cpi mpr, RockSigVal		; rock?
+	brne _notRHRock
+		ldi mpr, 7			; ID 7
+		jmp _rhCycleEnd
+_notRHRock:
+	cpi mpr, PaperSigVal	; paper?
+	brne _notRHPaper
+		ldi mpr, 8
+		jmp _rhCycleEnd
+_notRHPaper:
+	cpi mpr, ScissorSigVal	; scissor?
+	brne _rhCycleEnd
+		ldi mpr, 9
+		jmp _rhCycleEnd
+
+_rhCycleEnd:
+	ldi r17, 24		; RH string always offset of line 2 + 8
+	rcall LOADSTR	; display selected string
 
 	ldi		waitcnt, WTime	; Wait for 150ms
 	rcall	Wait	
+
+	pop r17
 	pop mpr
 	ret
 
@@ -270,7 +405,7 @@ _notLHPaper:
 		jmp _lhCycleEnd
 
 _lhCycleEnd:
-	ldi r17, 0		; LH string always offset 0
+	ldi r17, 16		; LH string always offset of line 2
 	rcall LOADSTR	; display selected string
 
 	ldi		waitcnt, WTime	; Wait for 150ms
@@ -307,23 +442,6 @@ USART_Receive:
 	pop mpr			; Restore mpr
 	ret
 
-
-;***********************************************************
-;*	DISPTIMER
-;*	Displays timer countdown on D4->D7 LEDs (0-15)
-;***********************************************************
-UPDATETIMERLEDS:
-	push mpr
-	push r18
-
-	mov mpr, ElapsedTime
-	ldi r18, 0b11110000	; we want PB4-7, the upper 4x LEDs
-	or mpr, r18
-	out PORTB, mpr
-
-	pop r18
-	pop mpr
-	ret
 
 ;***********************************************************
 ;*	USART_Init
@@ -437,10 +555,17 @@ NOT8:
 			rjmp LOAD
 NOT9:
 		cpi mpr, 10
-		brne NOLOAD		; If no ID available, just exit.
+		brne NOT10
 			ldi r18, 16					
 			ldi ZL, low(DIVIDER_BEG<<1)
 			ldi ZH, high(DIVIDER_BEG<<1)
+			rjmp LOAD
+NOT10:
+		cpi mpr, 11
+		brne NOLOAD		; If no ID available, just exit.
+			ldi r18, 16					
+			ldi ZL, low(CLRLINE_BEG<<1)
+			ldi ZH, high(CLRLINE_BEG<<1)
 			rjmp LOAD
 
 LOAD:
@@ -558,7 +683,11 @@ DIVIDER_BEG:
 .DB		"       |        "
 DIVIDER_END:
 
-
+; ID: 11
+; strlen 16
+CLRLINE_BEG:
+.DB		"                "
+CLRLINE_END:
 
 ;***********************************************************
 ;* Additional Program Includes
