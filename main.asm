@@ -249,6 +249,7 @@ clr r4		; count of written items
 clr OppRHGestReg
 clr OppLHGestReg
 
+rcall USART_Flush
 
 _ldLoopTop:
 
@@ -257,13 +258,7 @@ _ldLoopTop:
 
 	mov mpr, r3				; read count of recv'd items
 
-	ldi XL, $00
-	ldi XH, $01
-	rcall Bin2ASCII
-	rcall LCDWrite
-	mov mpr, r3
-
-	rcall USART_Receive		; get item if available
+	rcall USART_Receive		; receive into r17
 	cpi r17, 0				; nothing available, try to write
 	breq _tryWrite
 
@@ -275,10 +270,24 @@ _ldLoopTop:
 	breq _tryWrite
 _lhValRead:
 	mov OppLHGestReg, r17
+
+	mov mpr, OppLHGestReg
+	ldi XL, $00
+	ldi XH, $01
+	rcall Bin2ASCII
+	rcall LCDWrite		; Prints 5 for some god forsaken reason
+
 	jmp _doneValRead
 
 _rhValRead:
 	mov OppRHGestReg, r17
+
+	mov mpr, OppRHGestReg
+	ldi XL, $08
+	ldi XH, $01
+	rcall Bin2ASCII
+	rcall LCDWrite		; Prints 5 for some god forsaken reason
+
 	jmp _doneValRead
 
 _doneValRead:
@@ -288,22 +297,31 @@ _doneValRead:
 _tryWrite:
 	mov mpr, r4	; get count of total sent items
 
-	ldi XL, $10
-	ldi XH, $01
-	rcall Bin2ASCII
-	rcall LCDWrite
-	mov mpr, r4
-
 	cpi mpr, 0	; sent nothing? send LH
 	breq _txLhGest
 	jmp _txRhGest
 _txLhGest:
 		mov r17, LHGestureReg
+
+		mov mpr, RHGestureReg
+			ldi XL, $10
+			ldi XH, $01
+			rcall Bin2ASCII
+			rcall LCDWrite ; prints correct value to be transmitted
+
 		jmp _doValWrite
 _txRhGest:
 		cpi mpr, 1				; sent lh item?
 		brne _ldLoopCheck		; val is 2, jump out
+
 		mov r17, RHGestureReg	; send RH gest.
+
+		mov mpr, RHGestureReg
+			ldi XL, $18
+			ldi XH, $01
+			rcall Bin2ASCII
+			rcall LCDWrite ; prints correct value to be transmitted
+
 		jmp _doValWrite
 
 
@@ -311,13 +329,7 @@ _txRhGest:
 _doValWrite:
 
 	rcall USART_TryTx
-	mov mpr, r1
-
-	ldi XL, $18
-	ldi XH, $01
-	rcall Bin2ASCII
-	rcall LCDWrite
-	mov mpr, r1
+	mov mpr, r1				; load status of transmit
 
 	cpi mpr, 1				; are we back here because it failed??
 	breq _ldLoopCheck		; yes: jump to bottom
@@ -329,35 +341,18 @@ _ldLoopCheck:
 	; add both, and cp against 4 to see if all done
 	mov r2, r4
 	add r2, r3
-	mov mpr, r2
+	mov mpr, r2		; copy sum into mpr
 
-	ldi XL, $08
-	ldi XH, $01
-	rcall Bin2ASCII
-	rcall LCDWrite
-	mov mpr, r2
-	cpi	mpr, 4
+	ldi		waitcnt, WTime	; Wait for 150ms
+	rcall	Wait
 
+	cpi	mpr, 4		; all transmits/receives done?
 	breq _doneRxTx
+
 	jmp _ldLoopTop
 
 _doneRxTx:
 
-
-; !@#!@# TEST! !@#!@#! REMOVE BEFORE FLIGHT !@#!@#!@
-rcall LCDClr
-
-	mov mpr, OppLHGestReg
-	ldi XL, $00
-	ldi XH, $01
-	rcall Bin2ASCII
-	rcall LCDWrite
-
-	mov mpr, OppRHGestReg
-	ldi XL, $10
-	ldi XH, $01
-	rcall Bin2ASCII
-	rcall LCDWrite
 	; spin here
 	testTop1:	
 			rjmp testTop1
@@ -454,7 +449,7 @@ USART_TryTx:
 	; Wait for empty transmit buffer
 	lds mpr, UCSR1A
 	cpi mpr, (1<<UDRE1)
-	brne _txmit
+	breq _txmit ; if EQUAL to one, go to transmit
 	inc r1
 	ret
 _txmit:
