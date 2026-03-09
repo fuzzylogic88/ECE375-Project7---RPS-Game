@@ -11,15 +11,22 @@
 ;*	Internal Register Definitions and Constants
 ;***********************************************************
 
+; Gestures 
 ; cycle between vals 1-3 (rock,paper,scissor)
 .def	OppLHGestReg = r5
 .def	OppRHGestReg = r6
 .def	RHGestureReg = r7 
 .def	LHGestureReg = r8
 
+
 ; Time
 .def	ElapsedTicks = r9
 .def	RemainingTime = r10
+
+; Receive and Transmit
+.def	ReceiveReg = r11
+.def	TransmitReg = r12
+.def	TransmitSuccessReg = r13
 
 .def	mpr = r16				; Multipurpose register
 
@@ -66,9 +73,6 @@
 .org $0000		; Beginning of IVs
 rjmp INIT		; Reset interrupt
 
-.org OVF1addr	; timer counter 1 overflow
-rjmp TC1OVF
-
 .org	$0056	; End of Interrupt Vectors
 
 ;***********************************************************
@@ -100,10 +104,6 @@ INIT:
 		rcall LCDClr
 
 		rcall USART_INIT
-
-		; Configure the External Interrupt Mask
-		ldi mpr, (1<<INT0)|(1<<INT1)|(1<<INT3)
-		out EIMSK, mpr
 
 		; Configure 16-bit Timer/Counter 1A and 1B
 		; set compare output mode (COM) and wave generation mode (WGM) for both timers
@@ -145,39 +145,25 @@ _grWaitA:
 		cpi		mpr, 0				; Is it pressed?
 		brne	_grWaitA			; Not pressed, jump to top of loop.
 
-		; debounce
-		ldi		waitcnt, WTime	; Wait for 150ms
-		rcall	Wait	
+; end of polling for button press
 
 		rcall LCDClr
-
-		; txmit ready signal, and preserve preexisting value
-		rcall USART_Receive
-		mov r18, r17
-
-		ldi r17, ReadySigVal
-		rcall USART_Transmit
-		
-
 		; display ready message (ID 4)
 		ldi mpr, 4
 		ldi r17, 0	
 		rcall LOADSTR
 
-		; read whatever data might've been waiting in recv buffer
-		; if we've already gotten the ready signal, skip the poll
-		cpi r18, ReadySigVal
-		brne _readyWaitTop
-		jmp _bothRdy
-
-clr r17
-_readyWaitTop:
+		; receive and transmit ready signal
+		rcall USART_Transmit
 		rcall USART_Receive
-		cpi	r17, ReadySigVal
-		brne _readyWaitTop
 
-_bothRdy:
+		; after the ready signal is exchanged, clear flags
+		ldi mpr, (1<<TXC1)
+		sts UCSR1A, mpr
+		clr ReceiveReg
+
 		; everyone's ready, start 6-second countdown /w LEDs
+
 		; disp gamestart message (ID 2) and divider for RH/LH gestures
 		ldi mpr, 2
 		ldi r17, 0
@@ -188,180 +174,114 @@ _bothRdy:
 		ldi r17, 16
 		rcall LOADSTR
 
-		; clear gesture regs
-		clr RHGestureReg
-		clr LHGestureReg
+		; set default gesture to rock
+		ldi mpr, RockSigVal
+		mov RHGestureReg, mpr
+		ldi mpr, RockSigVal
+		mov LHGestureReg, mpr
 
-ldi mpr, CountTime
-mov RemainingTime, mpr 
-clr ElapsedTicks
-sei
+		; show default on lcd
+		ldi mpr, 7			; ID 7 = Rock
+		ldi r17, 16			
+		rcall LOADSTR
+
+		ldi mpr, 7
+		ldi r17, 24
+		rcall LOADSTR
+
+		; show 4 lights to start
+		ldi mpr, FourSec
+		out PORTB, mpr
+
+		clr ElapsedTicks
+
 _gameLoopA:
 	
-			; poll for RH changes
-			in		mpr, PIND					; Read button state
-			andi	mpr, (1<<CycleGestureRHBtn)	; Mask button into mpr 
-			cpi		mpr, 0						; Is it pressed?
-			breq _cycleRHInternal
-			jmp _skipRHCycle
-	_cycleRHInternal:
-			rcall CYCLERHGESTURE
+		; poll for RH changes
+		in		mpr, PIND					; Read button state
+		sbrc	mpr, CycleGestureRHBtn		; Mask button into mpr
+		rjmp		_skipRHCycle
+		rcall CYCLERHGESTURE
 
 	_skipRHCycle:
-			; poll for LH changes
-			in		mpr, PIND					; Read button state
-			andi	mpr, (1<<CycleGestureLHBtn)	; Mask only start button (7) state into mpr 
-			cpi		mpr, 0
-			breq _cycleLHInternal
-			jmp _skipLHCycle
-	_cycleLHInternal:
-			rcall CYCLELHGESTURE
+		; poll for LH changes
+		in		mpr, PIND					; Read button state
+		sbrc	mpr, CycleGestureLHBtn	; Mask only start button (7) state into mpr 
+		rjmp _skipLHCycle
+		rcall CYCLELHGESTURE
 
 	_skipLHCycle:
+		; check timer overflow
+		in mpr, TIFR1
+		sbrs mpr, TOV1
+		rjmp _gameLoopA	; otherwise repeat gameLoopA
 
-			; timer read, tick, and compare
-			; !!!! CRITICAL SECTION BEGIN !!!!
-			cli
-			mov mpr, ElapsedTicks
-			cpi mpr, 3 ; 3 ticks => 1.5sec elapsed
-			brlo _noTickA	; mpr < 2, no big tick
-	_doCountdownTickA:
-			dec RemainingTime
-			clr ElapsedTicks
-	_noTickA:
-			rcall DISPTIMER
-			mov mpr, RemainingTime
-			cpi mpr, 0	; have six seconds elapsed?
-			sei
-			; !!!! CRITICAL SECTION END !!!!
-			brne _gameLoopA
+		; clear overflow
+		ldi mpr, (1<<TOV1)
+		out TIFR1, mpr
 
-_gameFinishedA:
-cli
+		; increment elapsed ticks
+		inc ElapsedTicks
+		
+		; display on lights time remaining
+		; if time elapsed = 3, show three lights
+		mov r17, ElapsedTicks	; use r17 for elapsed compares
+		cpi r17, 3
+		brne _checkTwo
+			ldi mpr, ThreeSec
+			out PORTB, mpr
+			rjmp _gameLoopA
+_checkTwo:
+		; if time elapsed = 6, show two lights
+		cpi r17, 6
+		brne _checkThree
+			ldi mpr, TwoSec
+			out PORTB, mpr
+			rjmp _gameLoopA
 
-; !@#!@# TEST! !@#!@#! REMOVE BEFORE FLIGHT !@#!@#!@
-rcall LCDClr
+_checkThree:
+		; if time elapsed = 9, show one light
+		cpi r17, 9
+		brne _checkTimeUp
+			ldi mpr, OneSec
+			out PORTB, mpr
+			rjmp _gameLoopA
+		
+_checkTimeUp:
+		; time up?
+		mov r17, ElapsedTicks
+		cpi r17, 12		; 12 = 6 sec elapsed
+		brne _gameLoopA ; repeat unless time is up
 
-clr r1		; write OK????
-clr r2		; sum of total rx/tx
-clr r3		; count of recv'd items
-clr r4		; count of written items
-clr OppRHGestReg
-clr OppLHGestReg
+		; turn off lights
+		ldi mpr, 0
+		out PORTB, mpr
+	
+; end of game loop A
+	
+	; exchange gesture values
+	; Gesture 1
+	; load transmit register with left hand gesture
+	mov TransmitReg, LHGestureReg
+	rcall USART_Transmit
+	rcall USART_Receive
+	; process opponent's left hand gesture
+	mov OppLHGestReg, ReceiveReg
 
-rcall USART_Flush
-
-_ldLoopTop:
-
-	clr r17
-	clr mpr
-
-	mov mpr, r3				; read count of recv'd items
-
-	rcall USART_Receive		; receive into r17
-	cpi r17, 0				; nothing available, try to write
-	breq _tryWrite
-
-	cpi mpr, 0				; first item? (lh)
-	breq _lhValRead
-	cpi mpr, 1				; 2nd item (rh)
-	breq _rhValRead			
-	cpi mpr, 2				; done reading, try to write
-	breq _tryWrite
-_lhValRead:
-	mov OppLHGestReg, r17
-
-	mov mpr, OppLHGestReg
-	ldi XL, $00
-	ldi XH, $01
-	rcall Bin2ASCII
-	rcall LCDWrite		; Prints 5 for some god forsaken reason
-
-	jmp _doneValRead
-
-_rhValRead:
-	mov OppRHGestReg, r17
-
-	mov mpr, OppRHGestReg
-	ldi XL, $08
-	ldi XH, $01
-	rcall Bin2ASCII
-	rcall LCDWrite		; Prints 5 for some god forsaken reason
-
-	jmp _doneValRead
-
-_doneValRead:
-	inc r3
-	jmp _ldLoopCheck
-
-_tryWrite:
-	mov mpr, r4	; get count of total sent items
-
-	cpi mpr, 0	; sent nothing? send LH
-	breq _txLhGest
-	jmp _txRhGest
-_txLhGest:
-		mov r17, LHGestureReg
-
-		mov mpr, RHGestureReg
-			ldi XL, $10
-			ldi XH, $01
-			rcall Bin2ASCII
-			rcall LCDWrite ; prints correct value to be transmitted
-
-		jmp _doValWrite
-_txRhGest:
-		cpi mpr, 1				; sent lh item?
-		brne _ldLoopCheck		; val is 2, jump out
-
-		mov r17, RHGestureReg	; send RH gest.
-
-		mov mpr, RHGestureReg
-			ldi XL, $18
-			ldi XH, $01
-			rcall Bin2ASCII
-			rcall LCDWrite ; prints correct value to be transmitted
-
-		jmp _doValWrite
-
-
-
-_doValWrite:
-
-	rcall USART_TryTx
-	mov mpr, r1				; load status of transmit
-
-	cpi mpr, 1				; are we back here because it failed??
-	breq _ldLoopCheck		; yes: jump to bottom
-
-	inc r4					; no: increment count of written items
-	jmp _ldLoopCheck
-
-_ldLoopCheck:
-	; add both, and cp against 4 to see if all done
-	mov r2, r4
-	add r2, r3
-	mov mpr, r2		; copy sum into mpr
-
+	rcall USART_Flush
 	ldi		waitcnt, WTime	; Wait for 150ms
 	rcall	Wait
+	rcall USART_Flush
 
-	cpi	mpr, 4		; all transmits/receives done?
-	breq _doneRxTx
+	; Gesture 2
+	; load transmit register with right hand gesture
+	rcall USART_Transmit
+	rcall USART_Receive
+	; process opponent's right hand gesture
+	mov OppRHGestReg, ReceiveReg
 
-	jmp _ldLoopTop
-
-_doneRxTx:
-
-	; spin here
-	testTop1:	
-			rjmp testTop1
-
-		; we will have recieved P2s RH and LH choices now, and sent ours
-		; 'get one out' starts here
-
-		; display opponent choices in correct locations
-		rcall DISPOPPGESTS
+	; display opponent's choices in correct locations
+	rcall DISPOPPGESTS
 
 ; spin here
 testTop2:	
@@ -371,7 +291,7 @@ testTop2:
 ldi mpr, CountTime
 mov RemainingTime, mpr 
 clr ElapsedTicks
-sei ; re-enable timer interrupt
+ ; re-enable timer interrupt
 _gameLoopB:
 
 	; poll for RH changes
@@ -407,7 +327,6 @@ _gameLoopB:
 			rcall DISPTIMER
 			mov mpr, RemainingTime
 			cpi mpr, 0	; have six seconds elapsed?
-			sei
 			; !!!! CRITICAL SECTION END !!!!
 		brne _gameLoopB
 
@@ -415,60 +334,6 @@ _gameLoopB:
 
 ;*	!!!	End of Main !!! !!!	End of Main !!! !!!	End of Main !!! 
 ;***************************************************************
-
-USART_Flush:
-	lds mpr, UCSR1A
-	cpi mpr, (1<<UDRE1)
-	brne _stopFlush
-	lds mpr, UDR1
-	rjmp USART_Flush
-_stopFlush:
-	ret
-
-
-;***********************************************************
-;*	USART_Transmit
-;*	Sends a single char in r17 over USART
-;***********************************************************
-USART_Transmit:
-
-	; Wait for empty transmit buffer
-	lds mpr, UCSR1A
-	cpi mpr, (1<<UDRE1)
-	brne USART_Transmit
-
-	; Put data (r17) into buffer, sends the data
-
-	sts UDR1,r17
-	ret
-
-; non-blocking ver of transmit, returns on full txmit buffer
-USART_TryTx:
-	clr r1	; clear success flag
-
-	; Wait for empty transmit buffer
-	lds mpr, UCSR1A
-	cpi mpr, (1<<UDRE1)
-	breq _txmit ; if EQUAL to one, go to transmit
-	inc r1
-	ret
-_txmit:
-	; Put data (r17) into buffer, sends the data
-	sts UDR1,r17
-	ret
-
-;******************************************************************
-;*	USART_Receive
-;*	gets newly-arrived char from recieve buffer and place into r17
-;******************************************************************
-USART_Receive:
-	push mpr		; Save mpr
-	clr r17
-	lds r17, UDR1	; Get data from Receive Data Buffer
-	pop mpr			; Restore mpr
-	ret
-
-
 
 TC1OVF:
 	push mpr
@@ -548,42 +413,33 @@ _skipOppWrite:
 ;*	Displays timer countdown on D4->D7 LEDs
 ;***********************************************************
 DISPTIMER:
-	push mpr
-	push r18
-
 	; read existing PB state
-	mov r18, RemainingTime
+	mov r18, ElapsedTicks
 
-	cpi r18, 4
-	brne _lt4
+	cpi r18, 3		; time elapsed < 3, 4 lights
+	brlo _lt4
 	ldi mpr, FourSec
-	jmp _tEnd
+	rjmp _tEnd
 _lt4:
-	cpi r18, 3
-	brne _lt3
+	cpi r18, 6		; time elapsed < 6, 3 lights
+	brlo _lt3
 	ldi mpr, ThreeSec
-	jmp _tEnd
+	rjmp _tEnd
 _lt3:
-	cpi r18, 2
-	brne _lt2
+	cpi r18, 9		; time elapsed < 9, 2 lights
+	brlo _lt2
 	ldi mpr, TwoSec
-	jmp _tEnd
+	rjmp _tEnd
 _lt2:
-	cpi r18, 1
-	brne _lt1
+	cpi r18, 12		; time elapsed < 12, 1 light
+	brlo _lt1
 	ldi mpr, OneSec
-	jmp _tEnd
+	rjmp _tEnd
 _lt1:
-	cpi r18, 0
-	brne _noChg
-	ldi mpr, 0
-	jmp _tEnd
+	ldi mpr, $00
 
 _tEnd:
 	out PORTB, mpr
-_noChg:
-	pop r18
-	pop mpr
 	ret
 
 ;***********************************************************
@@ -707,6 +563,63 @@ USART_Init:
 	pop r17
 	pop mpr
 	ret
+
+;***********************************************************
+;*	USART_Flush
+;*	Flushes the USART receive buffer by reading and
+;*	discarding all pending data in UDR1
+;***********************************************************
+USART_Flush:
+    lds     mpr, UCSR1A         ; Load USART Control/Status Register A
+    sbrs    mpr, RXC1           ; Skip next if receive buffer has data
+    ret                         ; No data — buffer empty, return
+    lds     mpr, UDR1           ; Read and discard the received byte
+    rjmp    USART_Flush         ; Check again for more pending bytes
+
+
+;***********************************************************
+;*	USART_Transmit
+;*	Sends a single char in TransmitReg over USART
+;***********************************************************
+USART_Transmit:
+
+	; Wait for empty transmit buffer
+	lds mpr, UCSR1A
+	sbrs mpr, UDRE1
+	rjmp USART_Transmit
+
+	; Put data (TransmitReg) into buffer, sends the data
+	sts UDR1, TransmitReg
+	ret
+
+; non-blocking ver of transmit, returns on full txmit buffer
+USART_TryTx:
+    clr  TransmitSuccessReg  ; assume failure
+    lds  mpr, UCSR1A
+    sbrs mpr, UDRE1
+    ret
+    sts  UDR1, TransmitReg
+    ldi  mpr, 1
+    mov  TransmitSuccessReg, mpr
+    ret
+
+;******************************************************************
+;*	USART_Receive
+;*	gets newly-arrived char from receive buffer and place into ReceiveReg
+;******************************************************************
+USART_Receive:
+	lds mpr, UCSR1A
+	sbrs mpr, RXC1
+	rjmp USART_Receive
+	lds ReceiveReg, UDR1	; Get data from Receive Data Buffer
+	ret
+
+USART_TryRx:
+    lds  mpr, UCSR1A
+    sbrs mpr, RXC1
+    ret                  ; return early if no data
+    lds  ReceiveReg, UDR1
+    ret
 
 ;*******************************************************************
 ;*	LOADSTR
