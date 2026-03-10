@@ -263,6 +263,12 @@ cli
 ldi mpr, CountTime
 mov RemainingTime, mpr 
 clr ElapsedTicks
+
+; preload target gesture with rock val
+; if nobody chooses anything, result is draw
+ldi mpr, RockSigVal
+mov TargetHandGesture, mpr
+
 sei ; re-enable timer interrupt
 _gameLoopB:
 
@@ -315,6 +321,7 @@ _shareResultsTop:
 	; store opponent's chosen hand gesture
 	mov OppTargetHandGesture, r17
 
+
 	; clear top line and display gesture
 	ldi mpr, 13
 	ldi r17, 0
@@ -336,12 +343,13 @@ _notOppPaperB:
 		ldi mpr, 9
 		jmp _oppCycleEndB
 
+
 _oppCycleEndB:
 	ldi r17, 0		; opponent string @ offset 0
 	rcall LOADSTR	; display selected string
 
 ; start new timer for 'shoot' choice
-ldi mpr, 3
+ldi mpr, 2
 mov RemainingTime, mpr 
 clr ElapsedTicks
 sei ; re-enable timer interrupt
@@ -349,6 +357,7 @@ _shareWaitTop:
 
 	; !!!! CRITICAL SECTION BEGIN !!!!
 			cli
+
 			mov mpr, ElapsedTicks
 			cpi mpr, 3 
 			brlo _noTickC
@@ -357,6 +366,10 @@ _shareWaitTop:
 	_noTickC:
 			rcall DISPTIMER
 			mov mpr, RemainingTime
+
+			rcall LCDWrite ; I don't know why this is necessary,
+						   ; But it won't print the opponent gesture w/o
+
 			cpi mpr, 0	
 			sei
 	; !!!! CRITICAL SECTION END !!!!
@@ -368,7 +381,7 @@ _shareWaitTop:
 	; stretch goal for sprint 2: Loser has their bootloader removed
 	rcall EVALGAME
 
-ldi mpr, 3 ; (3*1.5=>4.5sec delay)
+ldi mpr, CountTime ; (3*1.5=>4.5sec delay)
 mov RemainingTime, mpr 
 clr ElapsedTicks
 sei ; re-enable timer interrupt
@@ -382,7 +395,7 @@ _resultsWaitTop:
 			dec RemainingTime
 			clr ElapsedTicks
 	_noTickD:
-			;rcall DISPTIMER
+			rcall DISPTIMER
 			mov mpr, RemainingTime
 			cpi mpr, 0
 			sei	
@@ -596,11 +609,11 @@ USART_Restart:
 ;***********************************************************
 USART_Transmit:
 	push mpr
-
+_txTop:
 	; Wait for empty transmit buffer
 	lds mpr, UCSR1A
 	sbrs mpr, UDRE1
-	rjmp USART_Transmit
+	rjmp _txTop
 
 	; Put data into buffer, sends the data
 	sts UDR1, r17
@@ -613,7 +626,6 @@ USART_Transmit:
 ;******************************************************************
 USART_Receive:
     push mpr
-
 wait_rx:
     lds mpr, UCSR1A
     sbrs mpr, RXC1
@@ -705,7 +717,6 @@ DISPTIMER:
 	push mpr
 	push r18
 
-	; read existing PB state
 	mov r18, RemainingTime
 
 	cpi r18, 4
