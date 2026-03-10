@@ -219,7 +219,6 @@ _gameLoopA:
 			mov mpr, ElapsedTicks
 			cpi mpr, 3 ; 3 ticks => 1.5sec elapsed
 			brlo _noTickA	; mpr < 2, no big tick
-	_doCountdownTickA:
 			dec RemainingTime
 			clr ElapsedTicks
 	_noTickA:
@@ -293,7 +292,6 @@ _gameLoopB:
 			mov mpr, ElapsedTicks
 			cpi mpr, 3 ; 3 ticks => 1.5sec elapsed
 			brlo _noTickB	; mpr < 2, no big tick
-	_doCountdownTickB:
 			dec RemainingTime
 			clr ElapsedTicks
 	_noTickB:
@@ -302,7 +300,7 @@ _gameLoopB:
 			cpi mpr, 0	; have six seconds elapsed?
 			sei
 			; !!!! CRITICAL SECTION END !!!!
-		brne _gameLoopB
+			brne _gameLoopB
 
 	cli	; disable interrupts
 
@@ -353,46 +351,43 @@ _shareWaitTop:
 			cli
 			mov mpr, ElapsedTicks
 			cpi mpr, 3 
-			brlo _noTickC	
-	_doCountdownTickC:
+			brlo _noTickC
 			dec RemainingTime
 			clr ElapsedTicks
 	_noTickC:
-			;rcall DISPTIMER
+			rcall DISPTIMER
 			mov mpr, RemainingTime
 			cpi mpr, 0	
 			sei
 	; !!!! CRITICAL SECTION END !!!!
-		brne _shareWaitTop
+			brne _shareWaitTop
 
 	cli
+
 	; evaluate choices to determine winners!
 	; stretch goal for sprint 2: Loser has their bootloader removed
 	rcall EVALGAME
 
-	ldi mpr, 3 ; (3*1.5=>4.5sec delay)
-	mov RemainingTime, mpr 
-	clr ElapsedTicks
-	sei ; re-enable timer interrupt
-
+ldi mpr, 3 ; (3*1.5=>4.5sec delay)
+mov RemainingTime, mpr 
+clr ElapsedTicks
+sei ; re-enable timer interrupt
 _resultsWaitTop:
 
 	; !!!! CRITICAL SECTION BEGIN !!!!
-cli
+			cli
 			mov mpr, ElapsedTicks
 			cpi mpr, 3 
 			brlo _noTickD	
-	_doCountdownTickD:
 			dec RemainingTime
 			clr ElapsedTicks
 	_noTickD:
 			;rcall DISPTIMER
 			mov mpr, RemainingTime
-			cpi mpr, 0	
-	; !!!! CRITICAL SECTION END !!!!
-sei
-		brne _resultsWaitTop
-
+			cpi mpr, 0
+			sei	
+	; !!!! CRITICAL SECTION END !!!!		
+			brne _resultsWaitTop
 
 	cli
 	rcall LCDClr
@@ -414,42 +409,62 @@ EVALGAME:
 	cpi mpr, RockSigVal
 	brne _evlNotRock 
 		cpi r18, RockSigVal
-			ldi mpr, 12								; Draw
-			jmp _evlPrintResult
+		brne _evl_rNr
+		jmp _evlDrawCond
+_evl_rNr:
 		cpi r18, PaperSigVal
-			ldi mpr, 6								; Lose
-			jmp _evlPrintResult
+		brne _evl_rNp
+		jmp _evlLossCond
+_evl_rNp:
 		cpi r18, ScissorSigVal
-			ldi mpr, 5								; Win
-			jmp _evlPrintResult
-_evlNotRock:
+		brne _evlEnd
+		jmp _evlWinCond
 
+_evlNotRock:
 	; we chose paper
 	cpi mpr, PaperSigVal
 	brne _evlNotPaper
 		cpi r18, RockSigVal
-			ldi mpr, 5								
-			jmp _evlPrintResult
+		brne _evl_pNr
+		jmp _evlWinCond
+_evl_pNr:
 		cpi r18, PaperSigVal
-			ldi mpr, 12								
-			jmp _evlPrintResult
+		brne _evl_pNp
+		jmp _evlDrawCond
+_evl_pNp:
 		cpi r18, ScissorSigVal
-			ldi mpr, 6								
-			jmp _evlPrintResult
+		brne _evlEnd
+		jmp _evlLossCond
+
 _evlNotPaper:
 
 	; we chose scissor
 	cpi mpr, ScissorSigVal
 	brne _evlEnd
 		cpi r18, RockSigVal
-			ldi mpr, 6							
-			jmp _evlPrintResult
+		brne _evl_sNr
+		jmp _evlLossCond
+_evl_sNr:
 		cpi r18, PaperSigVal
-			ldi mpr, 5								
-			jmp _evlPrintResult
+		brne _evl_sNp
+		jmp _evlWinCond
+_evl_sNp:
 		cpi r18, ScissorSigVal
-			ldi mpr, 12								
-			jmp _evlPrintResult
+		brne _evlEnd
+		jmp _evlDrawCond
+
+_evlWinCond:
+	ldi mpr, 5								; Win
+	jmp _evlPrintResult
+
+_evlLossCond:
+	ldi mpr, 6								; Lose
+	jmp _evlPrintResult
+
+_evlDrawCond:
+	ldi mpr, 12								; Draw
+	jmp _evlPrintResult
+
 
 _evlPrintResult:
 	ldi r17, 0		; RH string always offset of line 2 + 8
