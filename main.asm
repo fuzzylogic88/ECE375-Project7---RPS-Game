@@ -50,7 +50,6 @@
 
 ; Signals
 .equ	ReadySigVal = 0x05
-
 .equ	RockSigVal = 0x01
 .equ	PaperSigVal = 0x02
 .equ	ScissorSigVal = 0x03
@@ -105,10 +104,6 @@ INIT:
 
 		rcall USART_INIT
 
-		; Configure the External Interrupt Mask
-		ldi mpr, (1<<INT0)|(1<<INT1)|(1<<INT3)
-		out EIMSK, mpr
-
 		; Configure 16-bit Timer/Counter 1A and 1B
 		; set compare output mode (COM) and wave generation mode (WGM) for both timers
 		;
@@ -129,21 +124,19 @@ INIT:
 	
 		ldi r16, (1<<TOIE1)
 		sts TIMSK1, r16
+		; fall through to MAIN
 
-
-;***********************************************************
+;*************************************************************
 ;*	Main Program
 
 MAIN:
-
-		; Display welcome message line 1 (ID 1)
-		ldi mpr, 1
+		; Display welcome message
+		ldi mpr, 1		; ID 1
 		ldi r17, 0		; string occurs at offset zero
 		rcall LOADSTR	; load + display string ID 1
 
 ; poll for button press to start game
 _grWaitA:
-
 		in		mpr, PIND			; Read button state
 		andi	mpr, (1<<StartBtn)	; Mask only start button (7) state into mpr 
 		cpi		mpr, 0				; Is it pressed?
@@ -159,18 +152,16 @@ _grWaitA:
 		ldi r17, ReadySigVal
 		rcall USART_Transmit
 		
-		; display ready message (ID 4)
-		ldi mpr, 4
+		; display ready message
+		ldi mpr, 4 ; ID 4
 		ldi r17, 0	
 		rcall LOADSTR
 
-clr r17
 _readyWaitTop:
 		rcall USART_Receive
 		cpi	r17, ReadySigVal
 		brne _readyWaitTop
 
-_bothRdy:
 		; everyone's ready, start 6-second countdown /w LEDs
 		; disp gamestart message (ID 2) and divider for RH/LH gestures
 		ldi mpr, 2
@@ -186,12 +177,11 @@ _bothRdy:
 		clr RHGestureReg
 		clr LHGestureReg
 
-ldi mpr, CountTime
-mov RemainingTime, mpr 
-clr ElapsedTicks
-sei
+	ldi mpr, CountTime
+	mov RemainingTime, mpr 
+	clr ElapsedTicks
+	sei
 _gameLoopA:
-	
 			; poll for RH changes
 			in		mpr, PIND					; Read button state
 			andi	mpr, (1<<CycleGestureRHBtn)	; Mask button into mpr 
@@ -212,7 +202,6 @@ _gameLoopA:
 			rcall CYCLELHGESTURE
 
 	_skipLHCycle:
-
 			; timer read, tick, and compare
 			; !!!! CRITICAL SECTION BEGIN !!!!
 			cli
@@ -229,53 +218,46 @@ _gameLoopA:
 			; !!!! CRITICAL SECTION END !!!!
 			brne _gameLoopA
 
+	cli
 _gameFinishedA:
-cli
 	
-	; exchange gesture values
-	; Gesture 1
-	; load transmit register with left hand gesture
-	mov r17, LHGestureReg
+	; Exchange gesture values
+	; Load transmit register with left hand gesture and send
+	mov r17, LHGestureReg	
 	rcall USART_Transmit
 
+	; Process opponent's left hand gesture
 	rcall USART_Receive
-
-	; process opponent's left hand gesture
 	mov OppLHGestReg, r17
 
-	; Gesture 2
-	; load transmit register with right hand gesture
+	; Load transmit register with right hand gesture
 	mov r17, RHGestureReg
 	rcall USART_Transmit
-	rcall USART_Receive
 
-	; process opponent's right hand gesture
+	; Process opponent's right hand gesture
+	rcall USART_Receive
 	mov OppRHGestReg, r17
 
 	; display opponent's choices in correct locations
 	rcall DISPOPPGESTS
 
-; we will have recieved P2s RH and LH choices now, and sent ours
-; 'get one out' starts here
+	; 'get one out' part of game starts here
 
+	; preload target gesture with rock val
+	; if nobody chooses anything, result is draw
+	ldi mpr, RockSigVal
+	mov TargetHandGesture, mpr
 
-; start new timer for 'shoot' choice
-ldi mpr, CountTime
-mov RemainingTime, mpr 
-clr ElapsedTicks
-
-; preload target gesture with rock val
-; if nobody chooses anything, result is draw
-ldi mpr, RockSigVal
-mov TargetHandGesture, mpr
-
-sei ; re-enable timer interrupt
+	; start new timer for 'shoot' choice
+	ldi mpr, CountTime
+	mov RemainingTime, mpr 
+	clr ElapsedTicks
+	sei
 _gameLoopB:
-
-	; poll for RH changes
-			in		mpr, PIND					; Read button state
-			andi	mpr, (1<<CycleGestureRHBtn)	; Mask button into mpr 
-			cpi		mpr, 0						; Is it pressed?
+			; poll for RH changes
+			in		mpr, PIND
+			andi	mpr, (1<<CycleGestureRHBtn)
+			cpi		mpr, 0
 			breq _chooseRHInternal
 			jmp _skipRHChoose
 	_chooseRHInternal:
@@ -283,8 +265,8 @@ _gameLoopB:
 
 	_skipRHChoose:
 			; poll for LH changes
-			in		mpr, PIND					; Read button state
-			andi	mpr, (1<<CycleGestureLHBtn)	; Mask only start button (7) state into mpr 
+			in		mpr, PIND
+			andi	mpr, (1<<CycleGestureLHBtn)
 			cpi		mpr, 0
 			breq _chooseLHInternal
 			jmp _skipLHChoose
@@ -311,16 +293,14 @@ _gameLoopB:
 	cli	; disable interrupts
 
 _shareResultsTop:
-
-	; exchange final gesture choices
-	; load transmit register with gesture chosen
+	; Exchange final gesture choices
+	; Load transmit register with gesture chosen
 	mov r17, TargetHandGesture
 	rcall USART_Transmit
 	rcall USART_Receive
 
 	; store opponent's chosen hand gesture
 	mov OppTargetHandGesture, r17
-
 
 	; clear top line and display gesture
 	ldi mpr, 13
@@ -343,21 +323,24 @@ _notOppPaperB:
 		ldi mpr, 9
 		jmp _oppCycleEndB
 
-
 _oppCycleEndB:
 	ldi r17, 0		; opponent string @ offset 0
 	rcall LOADSTR	; display selected string
 
-; start new timer for 'shoot' choice
-ldi mpr, 2
-mov RemainingTime, mpr 
-clr ElapsedTicks
-sei ; re-enable timer interrupt
+	; remove divider from L2
+	ldi mpr, 14
+	ldi r17, 23
+	rcall LOADSTR
+
+	; start new timer for 'shoot' choice
+	ldi mpr, 2
+	mov RemainingTime, mpr 
+	clr ElapsedTicks
+	sei ; re-enable timer interrupt
 _shareWaitTop:
 
 	; !!!! CRITICAL SECTION BEGIN !!!!
 			cli
-
 			mov mpr, ElapsedTicks
 			cpi mpr, 3 
 			brlo _noTickC
@@ -369,7 +352,6 @@ _shareWaitTop:
 
 			rcall LCDWrite ; I don't know why this is necessary,
 						   ; But it won't print the opponent gesture w/o
-
 			cpi mpr, 0	
 			sei
 	; !!!! CRITICAL SECTION END !!!!
@@ -381,12 +363,12 @@ _shareWaitTop:
 	; stretch goal for sprint 2: Loser has their bootloader removed
 	rcall EVALGAME
 
-ldi mpr, CountTime ; (3*1.5=>4.5sec delay)
-mov RemainingTime, mpr 
-clr ElapsedTicks
-sei ; re-enable timer interrupt
-_resultsWaitTop:
+	ldi mpr, CountTime
+	mov RemainingTime, mpr 
+	clr ElapsedTicks
+	sei ; re-enable timer interrupt
 
+_resultsWaitTop:
 	; !!!! CRITICAL SECTION BEGIN !!!!
 			cli
 			mov mpr, ElapsedTicks
@@ -407,9 +389,12 @@ _resultsWaitTop:
 	rjmp	MAIN
 
 ;*	!!!	End of Main !!! !!!	End of Main !!! !!!	End of Main !!! 
-;***************************************************************
+;*****************************************************************
 
-
+;*****************************************************************
+;*	EVALGAME
+;*	Determines and communicates win/loss/draw condition to player
+;*****************************************************************
 EVALGAME:
 	push mpr
 	push r17
@@ -490,7 +475,10 @@ _evlEnd:
 	ret
 
 
-
+;*******************************************************************
+;*	TARGETRH
+;*	Changes player target hand/gesture for 'get one out' mode to RH
+;*******************************************************************
 TARGETRH:
 	push mpr
 	push r17
@@ -532,7 +520,10 @@ _rhCycleEndB:
 	ret
 
 
-
+;*******************************************************************
+;*	TARGETLH
+;*	Changes player target hand/gesture for 'get one out' mode to LH
+;*******************************************************************
 TARGETLH:
 	push mpr
 	push r17
@@ -573,35 +564,33 @@ _lhCycleEndB:
 	pop mpr
 	ret
 
+;***********************************************************
+;*	USART_Init
+;*	Configures and enables USART functionality
+;***********************************************************
+USART_Init:
+	push mpr
+	push r17  
 
-USART_Flush:
-	lds mpr, UCSR1A
-	cpi mpr, (1<<UDRE1)
-	brne _stopFlush
-	lds mpr, UDR1
-	rjmp USART_Flush
-_stopFlush:
+	; 416 = UBBRN for 2400 Baud
+	ldi mpr, low(416)
+	ldi mpr, high(416)
+
+	; Set baud rate
+	sts UBRR1H, r17
+	sts UBRR1L, mpr
+
+	; Enable receiver and transmitter
+	ldi mpr, (1<<RXEN1)|(1<<TXEN1)
+	sts UCSR1B, mpr
+
+	; Set frame format: 8data, 2stop bit
+	ldi mpr, (1<<USBS1)|(3<<UCSZ10)
+	sts UCSR1C, mpr
+
+	pop r17
+	pop mpr
 	ret
-
-;***********************************************************
-;*  USART_Restart
-;*  Disables then re-enables USART receiver to flush
-;*  any in-flight bytes and reset state
-;***********************************************************
-USART_Restart:
-    ; Disable receiver
-    lds     mpr, UCSR1B
-    andi    mpr, ~(1<<RXEN1)    ; clear RXEN1 bit
-    sts     UCSR1B, mpr
-
-    ; Flush any leftover bytes in buffer
-    rcall   USART_Flush
-
-    ; Re-enable receiver
-    lds     mpr, UCSR1B
-    ori     mpr, (1<<RXEN1)     ; set RXEN1 bit
-    sts     UCSR1B, mpr
-    ret
 
 ;***********************************************************
 ;*	USART_Transmit
@@ -635,7 +624,10 @@ wait_rx:
     pop mpr
     ret
 
-
+;***********************************************************
+;*	TC1OVF
+;*	Timer/Counter 1 Overflow ISR
+;***********************************************************
 TC1OVF:
 	push mpr
 	push r17
@@ -651,6 +643,10 @@ TC1OVF:
 	pop mpr
 	reti
 
+;***********************************************************
+;*	DISPOPPGESTS
+;*	Displays opponent's selected gestures on LCD
+;***********************************************************
 DISPOPPGESTS:
 	push mpr
 	push r17
@@ -844,35 +840,6 @@ _lhCycleEnd:
 	pop mpr
 	ret
 
-
-;***********************************************************
-;*	USART_Init
-;*	Configures and enables USART functionality
-;***********************************************************
-USART_Init:
-	push mpr
-	push r17  
-
-	; 416 = UBBRN for 2400 Baud
-	ldi mpr, low(416)
-	ldi mpr, high(416)
-
-	; Set baud rate
-	sts UBRR1H, r17
-	sts UBRR1L, mpr
-
-	; Enable receiver and transmitter
-	ldi mpr, (1<<RXEN1)|(1<<TXEN1)
-	sts UCSR1B, mpr
-
-	; Set frame format: 8data, 2stop bit
-	ldi mpr, (1<<USBS1)|(3<<UCSZ10)
-	sts UCSR1C, mpr
-
-	pop r17
-	pop mpr
-	ret
-
 ;*******************************************************************
 ;*	LOADSTR
 ;*	Reads and displays strings stored in program memory to LCD
@@ -978,10 +945,17 @@ NOT11:
 			rjmp LOAD
 NOT12:
 		cpi mpr, 13
-		brne NOLOAD			; If no ID available, just exit.
+		brne NOT13	
 			ldi r18, 16
 			ldi ZL, low(CLRLINE_BEG<<1)
 			ldi ZH, high(CLRLINE_BEG<<1)
+			rjmp LOAD
+NOT13:
+		cpi mpr, 14
+		brne NOLOAD		; If no ID available, just exit.
+			ldi r18, 1
+			ldi ZL, low(CLRSPC_BEG<<1)
+			ldi ZH, high(CLRSPC_BEG<<1)
 			rjmp LOAD
 LOAD:
 		; Load destination addr to place the string
@@ -1115,6 +1089,12 @@ DRAWMSG_END:
 CLRLINE_BEG:
 .DB		"                "
 CLRLINE_END:
+
+; ID: 14
+; strlen 1
+CLRSPC_BEG:
+.DB		" "
+CLRSPC_END:
 
 ;***********************************************************
 ;* Additional Program Includes
