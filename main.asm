@@ -3,7 +3,7 @@
 ;*
 ;*			Authors: Daniel Green, Graham Glazner
 ;*			Date Created: 2/27/2026
-;*			Date Modified: 3/10/2026
+;*			Date Modified: 3/11/2026
 ;
 ;***********************************************************
 
@@ -25,6 +25,7 @@
 .def	ElapsedTicks = r9
 .def	RemainingTime = r10
 
+; GPR
 .def	mpr = r16				; Multipurpose register
 
 ; Wait
